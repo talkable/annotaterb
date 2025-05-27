@@ -18,6 +18,10 @@ module AnnotateRb
           column_indices = table_indices.select { |ind| ind.columns.include?(@column.name) }
           column_defaults = @model.column_defaults
 
+          if @model.connection.is_a?(ActiveRecord::ConnectionAdapters::AbstractMysqlAdapter)
+            @column = enhance_column(@model, @column)
+          end
+
           column_attributes = AttributesBuilder.new(@column, @options, is_primary_key, column_indices, column_defaults).build
           formatted_column_type = TypeBuilder.new(@column, @options, column_defaults).build
 
@@ -32,6 +36,38 @@ module AnnotateRb
         end
 
         private
+
+        def enhance_column(model, column)
+          if column.virtual?
+            enhance_virtual_column(model, column)
+          elsif column.sql_type.match?(/\Aenum\b/)
+            enhance_enum_column(column)
+          else
+            column
+          end
+        end
+
+        def enhance_virtual_column(model, column)
+          column = column.dup
+          generation_expression = model.connection.query_value(<<~SQL.squish, "SCHEMA").gsub("\\'", "'").inspect
+            SELECT generation_expression FROM information_schema.columns
+            WHERE table_schema = database()
+              AND table_name = '#{model.table_name}'
+              AND column_name = '#{column.name}'
+          SQL
+
+          column.define_singleton_method(:default_function) { generation_expression }
+          column
+        end
+
+        def enhance_enum_column(column)
+          column = column.dup
+          enum_values = column.sql_type.scan(/\(([^()]*)\)/)
+
+          column.define_singleton_method(:type) { "enum" }
+          column.define_singleton_method(:limit) { enum_values }
+          column
+        end
 
         # TODO: Simplify this conditional
         def is_column_primary_key?(model, column_name)
