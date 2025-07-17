@@ -132,7 +132,7 @@ module AnnotateRb
           columns.map do |column|
             is_primary_key = is_column_primary_key?(column.name)
             column_indices = table_indices.select { |ind| ind.columns.include?(column.name) }
-            built = ColumnAnnotation::AttributesBuilder.new(column, @options, is_primary_key, column_indices, column_defaults).build
+            built = ColumnAnnotation::AttributesBuilder.new(enhance_column(column), @options, is_primary_key, column_indices, column_defaults).build
             [column.name, built]
           end.to_h
         end
@@ -220,6 +220,47 @@ module AnnotateRb
           :locale,
           @klass.name.foreign_key.to_sym
         ]
+      end
+
+      private
+
+      def enhance_column(column)
+        case connection.adapter_name
+        when "PostgreSQL"
+          return enhance_postgresql_enum_column(column.dup) if column.type == :enum
+        when "Trilogy"
+          return enhance_mysql_virtual_column(column.dup) if column.virtual?
+          return enhance_mysql_enum_column(column.dup) if column.sql_type.match?(/\Aenum\b/)
+        end
+
+        column
+      end
+
+      def enhance_mysql_virtual_column(column)
+        generation_expression = connection.query_value(<<~SQL.squish, "SCHEMA").gsub("\\'", "'").inspect
+          SELECT generation_expression FROM information_schema.columns
+          WHERE table_schema = database()
+            AND table_name = '#{table_name}'
+            AND column_name = '#{column.name}'
+        SQL
+
+        column.define_singleton_method(:default_function) { generation_expression }
+        column
+      end
+
+      def enhance_mysql_enum_column(column)
+        enum_values = column.sql_type.scan(/\(([^()]*)\)/)
+
+        column.define_singleton_method(:type) { "enum" }
+        column.define_singleton_method(:limit) { enum_values }
+        column
+      end
+
+      def enhance_postgresql_enum_column(column)
+        enum_values = connection.select_values("SELECT unnest(enum_range(NULL::#{column.sql_type}))::text")
+
+        column.define_singleton_method(:limit) { enum_values }
+        column
       end
     end
   end
