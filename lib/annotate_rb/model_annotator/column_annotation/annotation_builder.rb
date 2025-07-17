@@ -12,6 +12,8 @@ module AnnotateRb
         end
 
         def build
+          @column = enhance_column(@model, @column)
+
           column_attributes = @model.built_attributes[@column.name]
           formatted_column_type = TypeBuilder.new(@column, @options, @model.column_defaults).build
 
@@ -29,6 +31,47 @@ module AnnotateRb
             position_of_column_comment: position_of_column_comment,
             max_attributes_size: max_attributes_size
           )
+        end
+
+        private
+
+        def enhance_column(model, column)
+          case model.connection.adapter_name
+          when "PostgreSQL"
+            return enhance_postgresql_enum_column(model, column.dup) if column.type == :enum
+          when "Trilogy"
+            return enhance_mysql_virtual_column(model, column.dup) if column.virtual?
+            return enhance_mysql_enum_column(column.dup) if column.sql_type.match?(/\Aenum\b/)
+          end
+
+          column
+        end
+
+        def enhance_mysql_virtual_column(model, column)
+          generation_expression = model.connection.query_value(<<~SQL.squish, "SCHEMA").gsub("\\'", "'").inspect
+            SELECT generation_expression FROM information_schema.columns
+            WHERE table_schema = database()
+              AND table_name = '#{model.table_name}'
+              AND column_name = '#{column.name}'
+          SQL
+
+          column.define_singleton_method(:default_function) { generation_expression }
+          column
+        end
+
+        def enhance_mysql_enum_column(column)
+          enum_values = column.sql_type.scan(/\(([^()]*)\)/)
+
+          column.define_singleton_method(:type) { "enum" }
+          column.define_singleton_method(:limit) { enum_values }
+          column
+        end
+
+        def enhance_postgresql_enum_column(model, column)
+          enum_values = model.connection.select_values("SELECT unnest(enum_range(NULL::#{column.sql_type}))::text")
+
+          column.define_singleton_method(:limit) { enum_values }
+          column
         end
       end
     end
