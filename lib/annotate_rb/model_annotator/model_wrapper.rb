@@ -29,6 +29,7 @@ module AnnotateRb
 
             cols = cols.sort_by(&:name) if @options[:sort]
             cols = classified_sort(cols, @options[:grouped_polymorphic]) if @options[:classified_sort]
+            cols = cols.map { |col| enhance_column(col) }
 
             cols
           end
@@ -132,7 +133,7 @@ module AnnotateRb
           columns.map do |column|
             is_primary_key = is_column_primary_key?(column.name)
             column_indices = table_indices.select { |ind| ind.columns.include?(column.name) }
-            built = ColumnAnnotation::AttributesBuilder.new(enhance_column(column), @options, is_primary_key, column_indices, column_defaults).build
+            built = ColumnAnnotation::AttributesBuilder.new(column, @options, is_primary_key, column_indices, column_defaults).build
             [column.name, built]
           end.to_h
         end
@@ -249,15 +250,17 @@ module AnnotateRb
       end
 
       def enhance_mysql_enum_column(column)
-        enum_values = column.sql_type.scan(/\(([^()]*)\)/)
+        enum_values = [column.sql_type[/\(([^()]*)\)/, 1].tr("'", '"')]
 
-        column.define_singleton_method(:type) { "enum" }
+        column.define_singleton_method(:type) { :enum }
         column.define_singleton_method(:limit) { enum_values }
         column
       end
 
       def enhance_postgresql_enum_column(column)
-        enum_values = connection.select_values("SELECT unnest(enum_range(NULL::#{column.sql_type}))::text")
+        enum_values = connection
+          .select_values("SELECT unnest(enum_range(NULL::#{column.sql_type}))::text")
+          .map(&:inspect)
 
         column.define_singleton_method(:limit) { enum_values }
         column
